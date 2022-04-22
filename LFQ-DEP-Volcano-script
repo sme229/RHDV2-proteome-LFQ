@@ -1,0 +1,176 @@
+https://bioconductor.org/packages/devel/bioc/vignettes/DEP/inst/doc/DEP.html   #all good instructions can be found here
+
+library("dplyr")
+library("magrittr")
+
+if (!requireNamespace("BiocManager", quietly=TRUE))
+  install.packages("BiocManager")                                              #never install rtools even if it's asking you; run all 3 lines to upload the DEP package
+BiocManager::install("DEP")
+library("DEP")
+
+data <- read.csv(file.choose(), header = T)                                    #MQ protein groups file; input files folder 
+data <- filter(data, Reverse != "+", Potential.contaminant != "+")             #filtering those identified from decoy database and potential contaminants 
+colnames(data)
+
+                                                                                                                       
+data$Gene.names %>% duplicated() %>% any()                                     #here this function requires you to have a column called Gene.names. Please add it by just copying your protein IDs in there. MQ output did not have Gene.names column initially for some reason. 
+data %>% group_by(Gene.names) %>% summarize(frequency = n()) %>%               #this function is checking if your Gene.names (=protein IDs are unique). please run this even if you know they are unique
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+
+data_unique <- make_unique(data, "Gene.names", "Protein.IDs", delim = ";")  
+data$name %>% duplicated() %>% any()                                           #even if no duplicated genes found - do this step
+
+LFQ_columns <- grep("LFQ.", colnames(data_unique))                             #label-free quant columns is what we are looking at 
+experimental_design <- read.csv(file.choose(),header = T)                      #create this, refer to the package description and there is my file in the input files folder 
+
+experimental_design$label<- as.character(experimental_design$label)            #make them characters   
+experimental_design$condition<- as.character(experimental_design$condition)
+
+data_se <- make_se(data_unique, LFQ_columns, experimental_design)              #brings it all together and creates a SummarisedExperiment object 
+LFQ_columns <- grep("LFQ.intensity", colnames(data_unique))
+data_se_parsed <- make_se_parse(data_unique, LFQ_columns)
+
+data_se                                                                        #have a look at it, at column names and row names 
+colnames(data_se)
+rownames(data_se)
+
+plot_frequency(data_se)                                                        #Plot a barplot of the protein identification overlap between samples                                            
+
+data_filt <- filter_missval(data_se, thr = 0)                                  #Filter for proteins that are identified in _all_ replicates of at least one condition; this is strict: you can use thr = 1 which means filter for proteins that are identified in 2 out of 3 replicates in at least one condition 
+plot_numbers(data_filt)                                                        # a barplot of what's left  
+plot_coverage(data_filt)
+
+data_norm <- normalize_vsn(data_filt)                                          #normalisation  
+plot_normalization(data_filt, data_norm)                                       #compare the values before and after normalisation  
+
+plot_missval(data_filt)                                                        #we have missing values now and this plot shows you in which samples/conditions they are 
+plot_detect(data_filt)
+
+impute(data_norm, fun = "")                                                    #this gives you imputation options to choose from
+data_imp_man <- impute(data_norm, fun = "man", shift = 1.8, scale = 0.3)       #please read package description to choose the right imputation method
+plot_imputation(data_norm, data_imp_man)                                       #see the result of imputation 
+
+data_diff <- test_diff(data_imp_man, type = "control", control = "control")    #uses limma to test contrasts: test every sample vs control 
+
+dep <- add_rejections(data_diff, alpha = 0.05, lfc = log2(1.5))                #set up your threshold 
+                                                                               
+###################Visualisation
+
+plot_pca(dep, x = 1, y = 2, n = 500, point_size = 4)                           #principal component analysis 
+
+plot_cor(dep, significant = TRUE, lower = 0, upper = 1, pal = "Reds")          #Pearson correlation map 
+plot_heatmap(dep, type = "centered", kmeans = TRUE,                            #heatmap of significant proteins  
+             k = 6, col_limit = 4, show_row_names = FALSE,
+             indicate = c("condition", "replicate"))
+
+plot_volcano(dep, contrast = "infected_vs_control", label_size = 2, add_names = TRUE)                    #this one takes adjusted p-values; this is a default volcano from DEP package, i prefer to use EnhancedVolcano package, however, you can stop here. you have 31 significant protein if you use my dataset 
+
+data_results <- get_results(dep)                                                                         #extract your results table   
+data_results %>% filter(significant) %>% nrow()                                                          #get a number of significant proteins (by 'significant' a mean statistically significant differentially expressed)
+colnames(data_results)
+
+write.csv(data_results, "results05_kitten_RHDV2_DEP.csv")                                                #get the file with your results. this file doesn't have log2fold change
+test <- plot_volcano(dep, contrast = "infected_vs_control", label_size = 4, add_names = TRUE, plot = F)  #this function takes not adjusted p-values to calculate fold change
+head(test)  
+
+write.csv(test, "kittensRHDV2_volcanoplot_input.csv")                                                    #get the file that has everything ready for volcano plot
+
+###################file prep
+
+database <- read.csv(file.choose(), header =T, stringsAsFactor=F, fill=T)                                #import the uniprot database for rabbit proteome to get descriptions to the IDs for convinience 
+View(database)
+merged <- merge(test, database, by.x = "protein", by.y = "Entry", all.x = T) #merge the 2                #merge the files 
+
+test$protein <- sub("\\|", ";", test$protein)                                                            #this deletes everything before and after '|' and leaves UniProt IDs only - nice short names
+test$protein <-gsub(".*;", "", test$protein)
+test$protein <-gsub("\\|.*", "",test$protein)
+
+write.csv(merged, "kittensRHDV2_volcanoplot_input_merged.csv")                                           #export the file 
+merged <- read.csv(file.choose(), header = T)
+
+###enhanced volcano to make your volcano plot pretty
+library(EnhancedVolcano)                                                                                 #instructions here https://www.bioconductor.org/packages/release/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html
+
+merged <- read.csv(file.choose(), header = T)                                                            #the merged file refers to the abovementioned file merged with protein database to get the descriptive names
+EnhancedVolcano(merged,
+                lab = merged$protein,
+                x = "log2_fold_change",
+                y = "p_value_reverse",
+                
+                ylim = c(0,9),   #careful with the limits not to cut everything off
+                title = "Infected RHDV2 kittens vs uninfected, 24 hpi",
+                subtitle = "Proteomics differential expression",
+                col = c("black", "black", "black", "magenta"),
+                colAlpha = 0.4,
+                legendPosition = "right",
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                labSize = 2.0,
+                shape = c(6, 6, 6, 16),
+                pointSize = c(ifelse(merged$log2_fold_change>2, 3, 1)),
+                drawConnectors = TRUE,
+                widthConnectors = 0.3,
+                pCutoff = 0.01,
+                FCcutoff = 2)
+
+contrast = "infected_vs_control"
+label_size = 4
+add_names = TRUE
+adjusted = TRUE
+plot = TRUE
+
+#############################this volcano plot uses unadjusted p-values. I prefer to use adjusted ones, here is the script. the input file is proteins_lfc_padj.csv
+
+
+adj$name <- sub("\\|", ";", adj$name)                                                                      #this deletes everything and leaves UniProt IDs only - nice short names if you want to display them on the plot 
+adj$name <-gsub(".*;", "", adj$name)
+adj$name <-gsub("\\|.*", "",adj$name)
+
+merged <- merge(no_adj, adj, by.x = "protein", by.y = "name", all.x = T)
+
+newmerged <- read.csv(file.choose(), header = TRUE)                                                        #here i created manually a csv that only has 3 columns: protein names, log2fc and p-adj, the file is called proteins_lfc_padj.csv
+write.csv(merged, "mergednewvolcano.csv")
+library(EnhancedVolcano)
+library(ggrepel)                                                                                           #in case you don't have it
+merged <- na.omit(merged)
+EnhancedVolcano(newmerged,
+                lab = newmerged$protein,
+                x = "log2_fold_change",
+                y = "infected_vs_control_p.adj",
+                ylim = c(0,12),                                                                            #careful with the limits not to cut everything off
+                xlim = c(-7, 10),
+                title = "Infected RHDV2 kittens vs uninfected, 24 hpi",
+                subtitle = "Proteomics differential expression",
+                col = c("black", "black", "black", "magenta"),
+                colAlpha = 0.4,
+                legendPosition = "right",
+                legendLabels=c('Not significant','Log (base 2) FC','',
+                               'p-value adj & Log (base 2) FC'),
+                legendLabSize = 12,
+                legendIconSize = 4.0,
+                labSize = 3.0,
+                #shape = c(6, 6, 6, 16),
+                pointSize = c(ifelse(newmerged$log2_fold_change>2, 2.5, 1)),
+                drawConnectors = TRUE,
+                typeConnectors = "closed",
+                widthConnectors = 0.1,
+                colConnectors = "grey50",
+                pCutoff = 0.05,
+                FCcutoff = 2,
+                border = 'full',
+                borderWidth = 0.5,
+                borderColour = 'black'
+                ) 
+
+
+
+
+
+
+
+
+
+
+
+
+
